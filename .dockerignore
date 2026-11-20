@@ -1,5 +1,5 @@
 *
-!Dockerfile
 !requirements.txt
-!app.py
-!activation.py
+!lisensi.py
+!api.py
+!Dockerfile

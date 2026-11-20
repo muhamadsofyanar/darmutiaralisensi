@@ -1,31 +1,34 @@
-# Darmutiara · uji aktivasi mandiri
+# Penerbit Lisensi Darmutiara
 
-Aplikasi uji untuk membuktikan bahwa kunci dari penerbit Darmutiara bisa dipakai pada instalasi milik Darmutiara. Aplikasi memverifikasi tanda tangan Ed25519, domain instalasi, dan masa berlaku. Pengurus mengakses halaman dengan kredensial admin melalui HTTPS.
+Layanan lisensi independen untuk Darmutiara. Administrator menerbitkan, memperpanjang, dan mencabut lisensi lewat terminal privat. Instalasi yang sudah mengintegrasikan protokol Darmutiara memanggil API melalui HTTPS untuk memperoleh bukti aktivasi Ed25519.
 
-## Pasang sebagai resource uji di Coolify
+## Jalankan di Coolify
 
-1. Jalankan paket penerbit `darmutiara-lisensi-v1.zip` sebagai resource tersendiri dengan domain HTTPS, misalnya `lisensi.darmutiara.com`.
-2. Buat repositori untuk isi paket klien ini dan hubungkan sebagai resource Docker Compose baru. Arahkan domain uji HTTPS ke service `app`, port internal `8000`. Gunakan domain uji yang berbeda dari instalasi aktif yang sedang dipakai.
-3. Isi variabel resource lalu deploy.
-
-| Variabel | Isi |
-|---|---|
-| `APP_DOMAIN` | Domain uji klien, misalnya `uji.darmutiara.com`, tanpa protokol |
-| `ISSUER_URL` | Origin HTTPS penerbit, misalnya `https://lisensi.darmutiara.com` |
-| `ISSUER_PUBLIC_KEY` | Nilai kunci publik dari `python lisensi.py public-key` di container penerbit |
-| `ADMIN_USER` | Nama admin uji, nilai bawaan `admin` |
-| `ADMIN_PASSWORD` | Password baru yang acak, minimal 16 karakter |
-
-4. Di terminal **penerbit**, terbitkan lisensi untuk domain yang sama persis dengan `APP_DOMAIN`. Ganti contoh domain jika Anda memakai alamat lain.
+1. Tempatkan isi ZIP di root repositori privat layanan lisensi. Buat resource Docker Compose baru di Coolify menggunakan repositori itu.
+2. Pilih service `app` dan port internal `8000` di halaman Domains. Pakai subdomain HTTPS seperti `lisensi.darmutiara.com` setelah DNS disiapkan.
+3. Deploy. Cek `/health` untuk respons `{"status":"ok"}`. Volume bernama `licenses` menampung database serta kunci privat. Simpan cadangan privat volume tersebut agar kunci dan lisensi bertahan setelah pemulihan.
+4. Dari Terminal **container app pada layanan lisensi**, jalankan:
 
    ```sh
-   python lisensi.py issue --domain uji.darmutiara.com --customer "Darul Mutaqin Sejahtera" --days 30
+   python lisensi.py issue --domain darmutiara.com --customer "Darul Mutaqin Sejahtera" --days 365
    ```
 
-5. Buka domain uji melalui HTTPS, login sebagai admin, lalu masukkan kunci. Status menjadi **Aktif** jika lisensi berhasil diverifikasi.
+   Perintah menampilkan kunci lisensi satu kali. Simpan secara privat. Gunakan ID yang ditampilkan untuk administrasi berikutnya.
 
-Penyimpanan `activation_data` memuat kunci aktivasi dan bukti terbaru. Simpan volume dan cadangannya secara privat. Pada kunjungan admin, klien meminta bukti baru paling sering sekali per jam. Jika penerbit tidak dapat dijangkau, bukti lokal yang masih valid dapat digunakan hingga kedaluwarsa. Bila penerbit menolak lisensi, status aktif dihapus saat pemeriksaan ulang berikutnya.
+   ```sh
+   python lisensi.py list
+   python lisensi.py public-key
+   python lisensi.py renew ID_LISENSI --days 365
+   python lisensi.py revoke ID_LISENSI
+   ```
 
-## Status
+## Hubungkan aplikasi milik Anda
 
-Uji lokal mencakup issuer yang sebenarnya dari paket `darmutiara-lisensi-v1.zip`, HTTP aktivasi, domain berbeda, pencabutan, autentikasi admin, dan CSRF. Build image serta konfigurasi Coolify masih perlu diuji. Paket ini berisi halaman aktivasi. Modul anggota, Kajian, Diskusi, dan rilis pembaruan mandiri berada di luar uji ini.
+- Panggil `POST /v1/activate` melalui HTTPS dengan header `Content-Type: application/json` dan dua field, `license_key` serta `domain`. Ambil domain dari konfigurasi kanonik instalasi. Panggilan yang sama digunakan untuk validasi ulang.
+- Gunakan kunci publik dari `python lisensi.py public-key`, yang dipasang di sisi klien lewat konfigurasi tepercaya. Respons memuat `token` dan waktu kedaluwarsa. Token berisi `base64url(JSON).base64url(signature)`. Verifikasi tanda tangan atas teks ASCII segmen pertama, lalu cek issuer, domain, dan masa berlaku. Fungsi `verify` di `lisensi.py` adalah referensi Python.
+- Jadwalkan validasi ulang sebelum token berakhir. Bukti aktivasi berlaku maksimal 24 jam, dibatasi tanggal kedaluwarsa lisensi. Pencabutan menghentikan penerbitan token baru, dan token yang sudah diterbitkan berakhir sesuai waktu kedaluwarsanya.
+- Paket Averion yang ada di Coolify masih menggunakan aktivasi Averion. Integrasi layanan ini memerlukan aplikasi Darmutiara yang mendukung protokol di atas atau jalur integrasi yang diizinkan vendor. Panel visual dan layanan rilis pembaruan berada di luar paket awal ini.
+
+## Uji
+
+Jalankan `python -m unittest -v` setelah memasang dependensi. Pengujian memakai database sementara dan API lokal. Build image, konfigurasi DNS, HTTPS, dan deploy Coolify perlu diuji setelah resource baru dibuat.
