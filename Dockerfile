@@ -6,7 +6,7 @@ RUN groupadd --system --gid 10001 darmutiara \
     && install -d -m 700 -o 10001 -g 10001 /data
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
-COPY lisensi.py api.py ./
+COPY lisensi.py api.py dashboard.py ./
 USER 10001:10001
 EXPOSE 8000
 CMD ["sh", "-c", "python lisensi.py init && exec gunicorn --workers 2 --bind 0.0.0.0:8000 api:application"]

@@ -3,6 +3,9 @@ services:
     build: .
     expose:
       - "8000"
+    environment:
+      ISSUER_ADMIN_USER: ${ISSUER_ADMIN_USER:-admin}
+      ISSUER_ADMIN_PASSWORD: ${ISSUER_ADMIN_PASSWORD:-}
     volumes:
       - licenses:/data
 

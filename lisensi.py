@@ -90,21 +90,52 @@ def decode(encoded):
 
 
 def issue(domain, customer, days):
+    if not 1 <= days <= 3650:
+        raise ValueError("Masa berlaku harus 1–3650 hari.")
+    return issue_until(domain, customer, int(time.time()) + days * 86400)
+
+
+def issue_until(domain, customer, expiry):
     domain = normalize_domain(domain)
     customer = customer.strip()
     if not customer or len(customer) > 160:
         raise ValueError("Isi nama pelanggan dengan maksimal 160 karakter.")
-    if not 1 <= days <= 3650:
-        raise ValueError("Masa berlaku harus 1–3650 hari.")
+    validate_expiry(expiry)
     key = "DRM-" + secrets.token_urlsafe(32)
     license_id = str(uuid.uuid4())
-    expiry = int(time.time()) + days * 86400
     with database() as db:
         db.execute(
             "INSERT INTO licenses (id, key_digest, domain, customer, expires_at) VALUES (?, ?, ?, ?, ?)",
             (license_id, digest(key), domain, customer, expiry),
         )
     return {"id": license_id, "domain": domain, "expires_at": utc_time(expiry), "license_key": key}
+
+
+def validate_expiry(expiry):
+    now = int(time.time())
+    if not now < expiry <= now + 3650 * 86400:
+        raise ValueError("Pilih tanggal mendatang dalam 3650 hari ke depan.")
+
+
+def update_license(license_id, domain, customer, expiry, expected_domain):
+    domain = normalize_domain(domain)
+    customer = customer.strip()
+    if not customer or len(customer) > 160:
+        raise ValueError("Isi nama pelanggan dengan maksimal 160 karakter.")
+    with database() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT domain, expires_at FROM licenses WHERE id = ? AND revoked_at IS NULL",
+                         (license_id,)).fetchone()
+        if row is None:
+            raise ValueError("Lisensi tidak ditemukan atau sudah dicabut.")
+        if row["domain"] != expected_domain:
+            raise ValueError("Domain sudah berubah. Muat ulang detail lisensi sebelum menyimpan.")
+        if expiry is None:
+            expiry = row["expires_at"]
+        elif expiry != row["expires_at"]:
+            validate_expiry(expiry)
+        db.execute("UPDATE licenses SET domain = ?, customer = ?, expires_at = ? WHERE id = ?",
+                   (domain, customer, expiry, license_id))
 
 
 def activate(key, domain, now=None):

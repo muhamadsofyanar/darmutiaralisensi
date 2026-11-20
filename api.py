@@ -1,6 +1,7 @@
 import json
 import sqlite3
 
+from dashboard import admin
 from lisensi import activate
 
 
@@ -16,6 +17,8 @@ def response(start_response, status, data):
 def application(environ, start_response):
     path = environ["PATH_INFO"]
     method = environ["REQUEST_METHOD"]
+    if path == "/admin" or path.startswith("/admin/"):
+        return admin(environ, start_response)
     if path == "/health" and method == "GET":
         return response(start_response, "200 OK", {"status": "ok"})
     if path != "/v1/activate":

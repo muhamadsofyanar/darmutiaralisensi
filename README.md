@@ -32,3 +32,15 @@ Layanan lisensi independen untuk Darmutiara. Administrator menerbitkan, memperpa
 ## Uji
 
 Jalankan `python -m unittest -v` setelah memasang dependensi. Pengujian memakai database sementara dan API lokal. Build image, konfigurasi DNS, HTTPS, dan deploy Coolify perlu diuji setelah resource baru dibuat.
+
+## Dashboard admin
+
+1. Unggah file dari ZIP update ke repositori penerbit, dengan struktur folder yang sama. Gunakan resource penerbit **yang sudah ada** di Coolify. Biarkan volume `licenses` tetap terpasang pada `/data`. Database dan kunci penandatangan disimpan di volume itu.
+2. Di **Environment Variables** resource penerbit, isi `ISSUER_ADMIN_PASSWORD` dengan password acak minimal 16 karakter. Nama pengguna default `admin`. Untuk menggantinya, isi `ISSUER_ADMIN_USER`. Aktifkan **Available at Runtime**. Simpan dan deploy. Jangan commit password.
+3. Buka `https://lisensi.darmutiara.com/admin/`. Login pada dialog browser. Gunakan HTTPS dan simpan kredensial admin secara privat.
+4. Klik **Buat lisensi** untuk menerbitkan kunci, atau pilih domain di daftar untuk mengganti pelanggan, memperpanjang masa berlaku, memindahkan domain, atau mencabut lisensi. Tanggal dan jam di dashboard memakai WIB. Form masa berlaku pada detail menetapkan tanggal akhir yang baru.
+5. Salin kunci DRM pada halaman setelah lisensi diterbitkan. Database hanya menyimpan hash kunci. Untuk konfigurasi VPS, buka **Kunci publik** dan salin kunci Ed25519 ke aplikasi klien.
+
+Sebelum deploy, cadangkan volume `licenses` secara privat. Hindari membuat resource baru tanpa volume penerbit lama karena resource baru dapat membuat kunci penandatangan yang berbeda. Setelah deploy, cek `/health` dan pastikan kunci publik di dashboard sama dengan nilai yang digunakan klien.
+
+Perpindahan domain dan pencabutan berlaku saat klien kembali meminta bukti. Bukti yang sudah diterbitkan bisa tetap berlaku secara offline sampai kedaluwarsa. Jadwal kedaluwarsa lisensi baru dipakai saat permintaan bukti berikutnya.
