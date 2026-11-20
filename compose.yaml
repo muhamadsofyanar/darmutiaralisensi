@@ -1,0 +1,16 @@
+services:
+  app:
+    build: .
+    expose:
+      - "8000"
+    environment:
+      APP_DOMAIN: '${APP_DOMAIN:?Isi domain instalasi}'
+      ISSUER_URL: '${ISSUER_URL:?Isi URL HTTPS penerbit}'
+      ISSUER_PUBLIC_KEY: '${ISSUER_PUBLIC_KEY:?Isi kunci publik penerbit}'
+      ADMIN_USER: '${ADMIN_USER:-admin}'
+      ADMIN_PASSWORD: '${ADMIN_PASSWORD:?Buat password admin baru}'
+    volumes:
+      - activation_data:/data
+
+volumes:
+  activation_data:
