@@ -58,3 +58,11 @@ Perpindahan domain dan pencabutan berlaku saat klien kembali meminta bukti. Bukt
 Ekstrak ZIP pembaruan. Unggah isi folder ke root repositori `darmutiaralisensi` pada branch yang dibaca Coolify. Pastikan `compose.yaml` dan `Dockerfile` tetap berada di root. Gunakan resource penerbit yang sama untuk redeploy. Saat container mulai, inisialisasi menambahkan tabel dan pemicu pencatatan pada SQLite yang sudah ada sambil mempertahankan data lisensi dan kunci penandatangan yang ada pada volume.
 
 Untuk memeriksa hasil, buka `/health`, login ke dashboard, cocokkan kunci publik, lalu klik **Cek Ulang Lisensi** pada satu instalasi Kajian yang aktif. Pastikan kolom verifikasi berhasil diperbarui pada domain tersebut.
+
+### Antarmuka administrasi dan profil instalasi
+
+- Alamat dasar penerbit mengarahkan pengguna ke `/admin/`. Akses panel dan ekspor tetap menggunakan kredensial admin yang sama.
+- Menu **Pelanggan** mengelompokkan nama sesuai data lisensi yang tercatat. Menu **Instalasi** mengelompokkan domain. Buka satu entri untuk melihat lisensi terkait, termasuk riwayat lisensi yang sudah dicabut pada domain yang sama. Nama yang ditulis berbeda tampil sebagai entri tersendiri.
+- Dari detail lisensi, gunakan **Edit profil instalasi** untuk memilih Produksi atau Uji dan menambahkan catatan internal. Profil melekat pada ID lisensi yang dipilih. Catatan internal hanya tampil di panel admin. CSV memuat label lingkungan.
+- Form perpanjangan, edit, dan pencabutan tersedia pada bagian terpisah. Cek tanggal, domain, dan ID lisensi sebelum mengubah data.
+- Jalankan pembaruan dependensi, cadangan, dan simulasi pemulihan secara berkala. Menjaga volume `licenses` pada `/data` mempertahankan database dan kunci penandatangan lama saat redeploy.

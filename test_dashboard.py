@@ -73,3 +73,37 @@ class DashboardTest(unittest.TestCase):
         self.assertIn("uji.example,'=1+1,Dicabut", export)
         self.assertNotIn("legacy.example", export)
         self.assertNotIn(record["license_key"], export)
+
+    def test_root_redirects_to_protected_dashboard(self):
+        environ = {}
+        setup_testing_defaults(environ)
+        environ["PATH_INFO"] = "/"
+        headers = {}
+        list(api.application(environ, lambda status, fields: headers.update(fields, status=status)))
+        self.assertEqual(headers["status"], "302 Found")
+        self.assertEqual(headers["Location"], "/admin/")
+        self.assertEqual(self.request(headers["Location"], authorize=False)[0], 401)
+
+    def test_profile_and_exact_directory_filters(self):
+        record = lisensi.issue("uji.example", "Pelanggan Lama", 30)
+        lisensi.issue("uji.example", "Pelanggan Lama Dua", 60)
+        url = "/admin/license?" + urlencode({"id": record["id"]})
+        csrf = re.search(r'name="csrf" value="([^"]+)"', self.request(url)[1])[1]
+        form = {"id": record["id"], "csrf": csrf, "environment": "test", "notes": "<catatan>"}
+        self.assertEqual(self.request("/admin/profile", form | {"csrf": "bad"})[0], 403)
+        self.assertEqual(self.request("/admin/profile", form | {"environment": "invalid"})[0], 400)
+        self.assertEqual(self.request("/admin/profile", form)[0], 303)
+        detail = self.request(url + "&saved=profile")[1]
+        self.assertIn("Profil instalasi tersimpan.", detail)
+        self.assertIn("&lt;catatan&gt;", detail)
+        self.assertNotIn("<catatan>", detail)
+        self.assertIn("Pelanggan Lama Dua", self.request("/admin/customers")[1])
+        self.assertIn("uji.example", self.request("/admin/installations")[1])
+        scope = urlencode({"customer": "Pelanggan Lama", "domain": "uji.example"})
+        self.assertNotIn("Pelanggan Lama Dua", self.request("/admin/?" + scope)[1])
+        export = self.request("/admin/export.csv?" + scope)[1]
+        self.assertIn(",Uji", export)
+        self.assertNotIn("Pelanggan Lama Dua", export)
+        self.assertNotIn("catatan", export)
+        self.assertEqual(self.request("/admin/profile", form | {"notes": ""})[0], 303)
+        self.assertIn("Belum ada catatan", self.request(url)[1])

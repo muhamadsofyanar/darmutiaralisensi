@@ -37,6 +37,12 @@ CREATE TABLE IF NOT EXISTS licenses (
 );
 
 CREATE INDEX IF NOT EXISTS licenses_expiry ON licenses (expires_at, id);
+CREATE TABLE IF NOT EXISTS license_profiles (
+    license_id TEXT PRIMARY KEY,
+    environment TEXT NOT NULL CHECK (environment IN ('', 'production', 'test')),
+    notes TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS license_activity (
     license_id TEXT PRIMARY KEY,
     last_verified_at INTEGER NOT NULL,

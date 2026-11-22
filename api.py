@@ -17,6 +17,10 @@ def response(start_response, status, data):
 def application(environ, start_response):
     path = environ["PATH_INFO"]
     method = environ["REQUEST_METHOD"]
+    if path == "/" and method in ("GET", "HEAD"):
+        start_response("302 Found", [("Location", "/admin/"), ("Cache-Control", "no-store"),
+                                     ("Content-Length", "0")])
+        return [b""]
     if path == "/admin" or path.startswith("/admin/"):
         return admin(environ, start_response)
     if path == "/health" and method == "GET":
