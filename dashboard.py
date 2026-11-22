@@ -1,4 +1,6 @@
 import base64
+import csv
+import io
 from datetime import datetime, timedelta, timezone
 from html import escape
 import hashlib
@@ -22,6 +24,7 @@ STYLE = """
 :root{font:16px system-ui,sans-serif;color:#15332b;background:#f4f5ee;color-scheme:light}
 *{box-sizing:border-box}body{margin:0}a{color:#17614d}a:hover{text-decoration:none}
 header{background:#123b31;color:#fff;padding:1.1rem max(1.2rem,calc((100% - 70rem)/2))}
+header{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap}header nav{display:flex;gap:1.25rem}
 header a{color:inherit;text-decoration:none;font-weight:700}main{max-width:72rem;margin:auto;padding:2rem 1rem 4rem}
 h1{font-size:clamp(1.7rem,4vw,2.45rem);letter-spacing:-.04em;margin:0 0 .4rem}
 h2{font-size:1.12rem;margin:0 0 .85rem}p{line-height:1.55;margin:.45rem 0 .9rem}
@@ -38,6 +41,13 @@ button,.button{display:inline-block;border:1px solid #15634e;background:#15634e;
 .soon{background:#fff0c7}.expired,.revoked,.error{background:#f9e5dc;color:#74291f}
 .notice{padding:.7rem;border-radius:.5rem}.key{display:grid;gap:.5rem}.key input{font:1rem monospace;width:100%}
 .pagination{justify-content:space-between;padding-top:1rem}input[type=checkbox]{width:1rem}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,10rem),1fr));gap:.8rem}
+.metric{background:white;border:1px solid #dce4da;border-radius:.85rem;display:grid;gap:.4rem;padding:1rem;text-decoration:none}
+.metric:hover,.metric.selected{border-color:#17614d;background:#edf5ef}.metric strong{font-size:1.9rem}
+.panel .top h2{margin:0}.details{display:grid;grid-template-columns:minmax(8rem,1fr) 2fr;gap:.6rem;margin:0}
+.details dd{margin:0;overflow-wrap:anywhere}.history{padding-left:1.25rem}.history li{margin-bottom:.7rem}
+.detail-layout{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+@media(max-width:53rem){.detail-layout{grid-template-columns:1fr;gap:0}.editor{max-width:none}}
 :focus-visible{outline:3px solid #ca8d25;outline-offset:2px}@media(max-width:36rem){main{padding-top:1.35rem}}
 """
 SCRIPT = """
@@ -57,7 +67,7 @@ def page(start, title, body, status=200):
     raw = f"""<!doctype html><html lang="id"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{escape(title)} · Lisensi Darmutiara</title><style nonce="{nonce}">{STYLE}</style></head>
-<body><header><a href="/admin/">Darmutiara / Lisensi</a></header><main>{body}</main>
+<body><header><a href="/admin/">Darmutiara / Lisensi</a><nav aria-label="Administrasi"><a href="/admin/">Dasbor</a><a href="/admin/public-key">Kunci publik</a></nav></header><main>{body}</main>
 <script nonce="{nonce}">{SCRIPT}</script></body></html>""".encode()
     start(f"{status} {HTTPStatus(status).phrase}", [
         ("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(raw))),
@@ -85,49 +95,162 @@ def status_badge(row, now):
     return f'<span class="badge {status}">{STATUSES[status]}</span>'
 
 
-def dashboard(start, params, notice=""):
+def license_filters(params, now):
     query = params.get("q", [""])[0].strip()[:160]
     status = params.get("status", [""])[0]
+    sort = params.get("sort", [""])[0]
     if status not in STATUSES:
         status = ""
+    if sort not in SORTS:
+        sort = "expiry"
+    conditions = {
+        "": ("1", ()),
+        "active": ("revoked_at IS NULL AND expires_at > ?", (now + 30 * 86400,)),
+        "soon": ("revoked_at IS NULL AND expires_at > ? AND expires_at <= ?", (now, now + 30 * 86400)),
+        "expired": ("revoked_at IS NULL AND expires_at <= ?", (now,)),
+        "revoked": ("revoked_at IS NOT NULL", ()),
+    }
+    condition, args = conditions[status]
+    # instr treats percent and underscore in search text literally.
+    condition += " AND instr(casefold(domain || ' ' || customer), ?) > 0"
+    return query, status, sort, condition, (*args, query.casefold())
+
+
+SORTS = {
+    "expiry": ("Berakhir terdekat", "expires_at, id"),
+    "latest": ("Berakhir terjauh", "expires_at DESC, id"),
+    "domain": ("Domain A–Z", "domain, expires_at, id"),
+    "verified": ("Verifikasi terbaru", "last_verified_at DESC, id"),
+}
+LICENSE_ROWS = """
+SELECT id, domain, customer, expires_at, revoked_at, last_verified_at, successful_checks
+FROM licenses LEFT JOIN license_activity ON license_activity.license_id = licenses.id
+"""
+
+
+def dashboard(start, params):
+    now = int(time.time())
+    query, status, sort, condition, args = license_filters(params, now)
     try:
-        number = max(1, min(100000, int(params.get("page", ["1"])[0])))
+        number = max(1, int(params.get("page", ["1"])[0]))
     except ValueError:
         number = 1
-    now = int(time.time())
-    rows = []
     with database() as db:
-        for row in db.execute("SELECT id, domain, customer, expires_at, revoked_at FROM licenses ORDER BY expires_at, id"):
-            if query.casefold() not in (row["domain"] + " " + row["customer"]).casefold():
-                continue
-            if status and status != status_of(row, now):
-                continue
-            rows.append(row)
-    pages = max(1, (len(rows) + PAGE_SIZE - 1) // PAGE_SIZE)
-    number = min(number, pages)
+        db.create_function("casefold", 1, str.casefold)
+        db.execute("BEGIN")
+        metrics = db.execute("""
+            SELECT COUNT(*) AS total,
+                COUNT(CASE WHEN revoked_at IS NULL AND expires_at > :soon THEN 1 END) AS active,
+                COUNT(CASE WHEN revoked_at IS NULL AND expires_at > :now
+                           AND expires_at <= :soon THEN 1 END) AS soon,
+                COUNT(CASE WHEN revoked_at IS NULL AND expires_at <= :now THEN 1 END) AS expired,
+                COUNT(revoked_at) AS revoked
+            FROM licenses
+        """, {"now": now, "soon": now + 30 * 86400}).fetchone()
+        count = db.execute(f"SELECT COUNT(*) FROM licenses WHERE {condition}", args).fetchone()[0]
+        pages = max(1, (count + PAGE_SIZE - 1) // PAGE_SIZE)
+        number = min(number, pages)
+        rows = db.execute(
+            f"{LICENSE_ROWS} WHERE {condition} ORDER BY {SORTS[sort][1]} LIMIT ? OFFSET ?",
+            (*args, PAGE_SIZE, (number - 1) * PAGE_SIZE),
+        ).fetchall()
     options = "".join(f'<option value="{key}"{" selected" if status == key else ""}>{label}</option>'
                       for key, label in STATUSES.items())
+    sorts = "".join(f'<option value="{key}"{" selected" if sort == key else ""}>{label}</option>'
+                    for key, (label, _) in SORTS.items())
+
+    def link(path, **overrides):
+        values = {"q": query, "status": status, "sort": sort}
+        return path + "?" + escape(urlencode(values | overrides))
+
+    cards = "".join(
+        f'<a class="metric {"selected" if status == key else ""}" href="{link("/admin/", status=key, q="")}">'
+        f'<span>{label}</span><strong>{metrics[key or "total"]}</strong></a>'
+        for key, label in (("", "Total lisensi"), *list(STATUSES.items())[1:])
+    )
     table = "".join(
         f'<tr><td><a href="/admin/license?id={escape(row["id"])}">{escape(row["domain"])}</a></td>'
         f'<td>{escape(row["customer"])}</td><td>{status_badge(row, now)}</td>'
-        f'<td>{display_time(row["expires_at"])}</td></tr>'
-        for row in rows[(number - 1) * PAGE_SIZE:number * PAGE_SIZE]
+        f'<td>{display_time(row["expires_at"])}</td><td>{optional_time(row["last_verified_at"])}</td></tr>'
+        for row in rows
     )
-    def nav(target, label):
-        href = escape(urlencode({"q": query, "status": status, "page": target}))
-        return f'<a href="/admin/?{href}">{label}</a>'
-    return page(start, "Dashboard", f"""
-<div class="top"><div><h1>Kelola lisensi</h1><p class="muted">Atur akses instalasi berdasarkan domain.</p></div>
-<div class="buttons"><a class="button secondary" href="/admin/public-key">Kunci publik</a>
-<a class="button" href="/admin/new">Buat lisensi</a></div></div>{notice}
-<section class="panel"><form class="filters" method="get" action="/admin/">
-<label>Cari domain atau pelanggan<input name="q" value="{escape(query)}" maxlength="160" type="search"></label>
-<label>Status<select name="status">{options}</select></label><button class="secondary">Tampilkan</button></form>
-<p class="muted">{len(rows)} lisensi · Segera habis dalam 30 hari</p>
-<div class="table"><table><thead><tr><th>Domain</th><th>Pelanggan</th><th>Status</th><th>Berakhir</th></tr></thead>
-<tbody>{table or '<tr><td colspan="4">Tidak ada lisensi yang cocok.</td></tr>'}</tbody></table></div>
-<div class="pagination">{nav(number - 1, 'Sebelumnya') if number > 1 else '<span></span>'}
-<span>Halaman {number} / {pages}</span>{nav(number + 1, 'Berikutnya') if number < pages else '<span></span>'}</div></section>""")
+    previous = f'<a href="{link("/admin/", page=number - 1)}">Sebelumnya</a>' if number > 1 else '<span></span>'
+    following = f'<a href="{link("/admin/", page=number + 1)}">Berikutnya</a>' if number < pages else '<span></span>'
+    return page(start, "Dasbor", f"""
+<div class="top"><div><h1>Dasbor lisensi</h1><p class="muted">Pantau akses instalasi dan masa berlaku lisensi.</p></div>
+<div class="buttons"><a class="button" href="/admin/new">Buat lisensi</a></div></div>
+<div class="metrics">{cards}</div>
+<section class="panel"><div class="top"><h2>Daftar lisensi</h2>
+<a class="button secondary" href="{link('/admin/export.csv')}">Ekspor CSV</a></div>
+<form class="filters" method="get" action="/admin/">
+<label>Domain atau pelanggan<input name="q" value="{escape(query)}" maxlength="160" type="search"></label>
+<label>Status<select name="status">{options}</select></label>
+<label>Urutkan<select name="sort">{sorts}</select></label><button class="secondary">Terapkan</button></form>
+<p class="muted">{count} lisensi · Segera habis dalam 30 hari</p>
+<div class="table"><table><thead><tr><th>Domain</th><th>Pelanggan</th><th>Status</th><th>Berakhir</th>
+<th>Verifikasi terakhir</th></tr></thead>
+<tbody>{table or '<tr><td colspan="5">Tidak ada lisensi yang cocok.</td></tr>'}</tbody></table></div>
+<div class="pagination">{previous}<span>Halaman {number} / {pages}</span>{following}</div></section>""")
+
+
+def optional_time(value):
+    return display_time(value) if value is not None else "Belum tercatat"
+
+
+def export_csv(start, params):
+    now = int(time.time())
+    _, _, sort, condition, args = license_filters(params, now)
+    def spreadsheet_cell(value):
+        # Prevent spreadsheet formula interpretation for user-entered fields.
+        return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) or value.startswith(("\t", "\r", "\n")) else value
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(("ID", "Domain", "Pelanggan", "Status", "Berakhir", "Dicabut", "Verifikasi terakhir", "Verifikasi berhasil"))
+    with database() as db:
+        db.create_function("casefold", 1, str.casefold)
+        for row in db.execute(f"{LICENSE_ROWS} WHERE {condition} ORDER BY {SORTS[sort][1]}", args):
+            writer.writerow((row["id"], row["domain"], spreadsheet_cell(row["customer"]),
+                             STATUSES[status_of(row, now)], display_time(row["expires_at"]),
+                             optional_time(row["revoked_at"]), optional_time(row["last_verified_at"]),
+                             row["successful_checks"] or 0))
+    raw = output.getvalue().encode("utf-8-sig")
+    start("200 OK", [("Content-Type", "text/csv; charset=utf-8"),
+                     ("Content-Disposition", 'attachment; filename="darmutiara-lisensi.csv"'),
+                     ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
+                     ("Content-Length", str(len(raw)))])
+    return [raw]
+
+
+def license_summary(row):
+    with database() as db:
+        history = db.execute("""
+            SELECT * FROM license_history WHERE license_id = ? ORDER BY event_id DESC LIMIT 50
+        """, (row["id"],)).fetchall()
+    events = []
+    for event in history:
+        changes = []
+        if event["event"] == "updated":
+            for field, label, render in (
+                ("domain", "Domain", escape), ("customer", "Pelanggan", escape),
+                ("expiry", "Masa berlaku", display_time),
+            ):
+                previous = event["previous_" + field]
+                current = event[field]
+                if previous != current:
+                    changes.append(f"{label} {render(previous)} → {render(current)}")
+        label = {"issued": "Lisensi diterbitkan", "updated": "Lisensi diubah", "revoked": "Lisensi dicabut"}[event["event"]]
+        details = f'<br><small>{"<br>".join(changes)}</small>' if changes else ""
+        events.append(f'<li><strong>{label}</strong><br><small>{display_time(event["occurred_at"])}</small>{details}</li>')
+    history_html = f'<ol class="history">{"".join(events)}</ol>' if events else '<p>Belum ada perubahan yang tercatat.</p>'
+    return f"""
+<section class="panel"><h2>Informasi lisensi</h2>
+<dl class="details"><dt>ID lisensi</dt><dd><code>{escape(row["id"])}</code></dd>
+<dt>Domain</dt><dd>{escape(row["domain"])}</dd><dt>Pelanggan</dt><dd>{escape(row["customer"])}</dd>
+<dt>Status</dt><dd>{status_badge(row, int(time.time()))}</dd>
+<dt>Berakhir</dt><dd>{display_time(row["expires_at"])}</dd>
+<dt>Verifikasi terakhir</dt><dd>{optional_time(row["last_verified_at"])}</dd>
+<dt>Verifikasi berhasil</dt><dd>{row["successful_checks"] or 0}</dd></dl></section>
+<section class="panel"><h2>Riwayat perubahan</h2><p class="muted">Hingga 50 perubahan terbaru.</p>{history_html}</section>"""
 
 
 def secret_field(key, label):
@@ -154,8 +277,9 @@ def editor(start, csrf, row=None, form=None, error=""):
 <small>Jika diisi, tanggal khusus dipakai.</small>"""
     error_html = f'<p class="notice error" role="alert">{escape(error)}</p>' if error else ""
     back = '<p><a href="/admin/">← Semua lisensi</a></p>'
+    summary = license_summary(row) if editing else ""
     if editing and row["revoked_at"] is not None:
-        return page(start, title, f'{back}<h1>{title}</h1><div class="panel"><h2>{domain}</h2><p>{customer}</p><p>Dicabut pada {display_time(row["revoked_at"])}.</p></div>')
+        return page(start, title, f'{back}<h1>{title}</h1><p>Dicabut pada {display_time(row["revoked_at"])}.</p>{summary}')
     revoke = f"""<section class="panel"><h2>Cabut lisensi</h2>
 <p>Bukti yang sudah diterbitkan bisa tetap berlaku sampai diperiksa ulang atau kedaluwarsa.</p>
 <form method="post" action="/admin/revoke">{csrf_field}{id_field}
@@ -165,20 +289,26 @@ def editor(start, csrf, row=None, form=None, error=""):
     confirmation = """<div><input id="move" type="checkbox" name="confirm_move" value="yes">
 <label for="move">Konfirmasi jika domain berubah</label>
 <small>Instalasi lama akan ditolak pada pemeriksaan berikutnya.</small></div>""" if editing else ""
+    renewal = f"""<section class="panel"><h2>Perpanjang lisensi</h2>
+<p>Tambahkan hari dari tanggal berakhir atau dari hari ini jika lisensi sudah kedaluwarsa.</p>
+<form method="post" action="/admin/renew">{csrf_field}{id_field}
+<label>Tambahan masa berlaku (hari)<input name="days" type="number" min="1" max="3650" value="30" required></label>
+<div><button>Perpanjang</button></div></form></section>""" if editing else ""
     action = "license" if editing else "new"
-    return page(start, title, f"""{back}<h1>{title}</h1><div class="editor">{error_html}
+    layout = "detail-layout" if editing else ""
+    return page(start, title, f"""{back}<h1>{title}</h1><div class="{layout}"><div class="editor">{error_html}
 <section class="panel"><form method="post" action="/admin/{action}">{csrf_field}{id_field}
 <label>Domain<input name="domain" required maxlength="253" placeholder="kajian.contoh.id" value="{domain}"></label>
 <label>Pelanggan<input name="customer" required maxlength="160" value="{customer}"></label>
 {duration}{confirmation}<div><button>{"Simpan perubahan" if editing else "Terbitkan lisensi"}</button></div></form></section>
-{revoke}</div>""", 400 if error else 200)
+{renewal}{revoke}</div>{f"<div>{summary}</div>" if editing else ""}</div>""", 400 if error else 200)
 
 
 def get_license(license_id):
     if not license_id or str(uuid.UUID(license_id)) != license_id:
         raise ValueError("ID lisensi tidak valid.")
     with database() as db:
-        return db.execute("SELECT id, domain, customer, expires_at, revoked_at FROM licenses WHERE id = ?",
+        return db.execute(LICENSE_ROWS + " WHERE id = ?",
                           (license_id,)).fetchone()
 
 
@@ -213,6 +343,8 @@ def admin(environ, start):
             params = parse_qs(environ.get("QUERY_STRING", "")[:4096], max_num_fields=12)
             if path == "/admin":
                 return dashboard(start, params)
+            if path == "/admin/export.csv":
+                return export_csv(start, params)
             if path == "/admin/new":
                 return editor(start, csrf)
             if path == "/admin/public-key":
@@ -224,7 +356,7 @@ def admin(environ, start):
                 row = get_license(params.get("id", [""])[0])
                 if row is not None:
                     return editor(start, csrf, row)
-        elif path in ("/admin/new", "/admin/license", "/admin/revoke"):
+        elif path in ("/admin/new", "/admin/license", "/admin/revoke", "/admin/renew"):
             length = int(environ.get("CONTENT_LENGTH") or 0)
             if not 1 <= length <= 4096 or environ.get("CONTENT_TYPE", "").split(";")[0] != "application/x-www-form-urlencoded":
                 raise ValueError("Formulir tidak valid.")
@@ -248,6 +380,8 @@ def admin(environ, start):
                     if form.get("confirm") != "yes":
                         raise ValueError("Konfirmasikan pencabutan.")
                     manage(SimpleNamespace(command="revoke", id=row["id"]))
+                elif path == "/admin/renew":
+                    manage(SimpleNamespace(command="renew", id=row["id"], days=int(form.get("days", "0"))))
                 else:
                     domain = normalize_domain(form.get("domain", ""))
                     if domain != row["domain"] and form.get("confirm_move") != "yes":

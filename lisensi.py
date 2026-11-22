@@ -35,6 +35,44 @@ CREATE TABLE IF NOT EXISTS licenses (
     expires_at INTEGER NOT NULL,
     revoked_at INTEGER
 );
+
+CREATE INDEX IF NOT EXISTS licenses_expiry ON licenses (expires_at, id);
+CREATE TABLE IF NOT EXISTS license_activity (
+    license_id TEXT PRIMARY KEY,
+    last_verified_at INTEGER NOT NULL,
+    successful_checks INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS license_history (
+    event_id INTEGER PRIMARY KEY,
+    license_id TEXT NOT NULL,
+    occurred_at INTEGER NOT NULL,
+    event TEXT NOT NULL,
+    previous_domain TEXT,
+    domain TEXT NOT NULL,
+    previous_customer TEXT,
+    customer TEXT NOT NULL,
+    previous_expiry INTEGER,
+    expiry INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS license_history_by_license ON license_history (license_id, event_id);
+CREATE TRIGGER IF NOT EXISTS license_history_insert AFTER INSERT ON licenses
+BEGIN
+    INSERT INTO license_history (license_id, occurred_at, event, domain, customer, expiry)
+    VALUES (NEW.id, unixepoch(), 'issued', NEW.domain, NEW.customer, NEW.expires_at);
+END;
+CREATE TRIGGER IF NOT EXISTS license_history_update AFTER UPDATE ON licenses
+WHEN OLD.domain != NEW.domain OR OLD.customer != NEW.customer
+    OR OLD.expires_at != NEW.expires_at OR OLD.revoked_at IS NOT NEW.revoked_at
+BEGIN
+    INSERT INTO license_history (
+        license_id, occurred_at, event, previous_domain, domain, previous_customer,
+        customer, previous_expiry, expiry
+    ) VALUES (
+        NEW.id, unixepoch(), CASE WHEN NEW.revoked_at IS NOT OLD.revoked_at THEN 'revoked'
+            ELSE 'updated' END, OLD.domain, NEW.domain, OLD.customer, NEW.customer,
+        OLD.expires_at, NEW.expires_at
+    );
+END;
 """
 
 
@@ -144,6 +182,7 @@ def activate(key, domain, now=None):
     domain = normalize_domain(domain)
     now = int(time.time()) if now is None else now
     with database() as db:
+        db.execute("BEGIN IMMEDIATE")
         license_row = db.execute(
             "SELECT id, domain, expires_at, revoked_at FROM licenses WHERE key_digest = ? AND domain = ?",
             (digest(key), domain),
@@ -159,6 +198,12 @@ def activate(key, domain, now=None):
         }
         payload = encode(json.dumps(claims, separators=(",", ":")).encode("utf-8"))
         signature = signing_key(db).sign(payload.encode("ascii"))
+        db.execute("""
+            INSERT INTO license_activity (license_id, last_verified_at, successful_checks)
+            VALUES (?, ?, 1) ON CONFLICT (license_id) DO UPDATE SET
+            last_verified_at = MAX(last_verified_at, excluded.last_verified_at),
+            successful_checks = successful_checks + 1
+        """, (license_row["id"], now))
         return {"token": payload + "." + encode(signature), "expires_at": utc_time(claims["exp"])}
 
 

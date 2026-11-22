@@ -1,6 +1,6 @@
 # Penerbit Lisensi Darmutiara
 
-Layanan lisensi independen untuk Darmutiara. Administrator menerbitkan, memperpanjang, dan mencabut lisensi lewat terminal privat. Instalasi yang sudah mengintegrasikan protokol Darmutiara memanggil API melalui HTTPS untuk memperoleh bukti aktivasi Ed25519.
+Layanan lisensi independen untuk Darmutiara. Administrator dapat menerbitkan, memperpanjang, dan mencabut lisensi melalui dashboard atau terminal privat. Instalasi yang sudah mengintegrasikan protokol Darmutiara memanggil API melalui HTTPS untuk memperoleh bukti aktivasi Ed25519.
 
 ## Jalankan di Coolify
 
@@ -27,7 +27,7 @@ Layanan lisensi independen untuk Darmutiara. Administrator menerbitkan, memperpa
 - Panggil `POST /v1/activate` melalui HTTPS dengan header `Content-Type: application/json` dan dua field, `license_key` serta `domain`. Ambil domain dari konfigurasi kanonik instalasi. Panggilan yang sama digunakan untuk validasi ulang.
 - Gunakan kunci publik dari `python lisensi.py public-key`, yang dipasang di sisi klien lewat konfigurasi tepercaya. Respons memuat `token` dan waktu kedaluwarsa. Token berisi `base64url(JSON).base64url(signature)`. Verifikasi tanda tangan atas teks ASCII segmen pertama, lalu cek issuer, domain, dan masa berlaku. Fungsi `verify` di `lisensi.py` adalah referensi Python.
 - Jadwalkan validasi ulang sebelum token berakhir. Bukti aktivasi berlaku maksimal 24 jam, dibatasi tanggal kedaluwarsa lisensi. Pencabutan menghentikan penerbitan token baru, dan token yang sudah diterbitkan berakhir sesuai waktu kedaluwarsanya.
-- Paket Averion yang ada di Coolify masih menggunakan aktivasi Averion. Integrasi layanan ini memerlukan aplikasi Darmutiara yang mendukung protokol di atas atau jalur integrasi yang diizinkan vendor. Panel visual dan layanan rilis pembaruan berada di luar paket awal ini.
+- Paket Averion yang ada di Coolify masih menggunakan aktivasi Averion. Integrasi layanan ini memerlukan aplikasi Darmutiara yang mendukung protokol di atas atau jalur integrasi yang diizinkan vendor. Layanan ini menangani penerbitan lisensi Darmutiara.
 
 ## Uji
 
@@ -44,3 +44,17 @@ Jalankan `python -m unittest -v` setelah memasang dependensi. Pengujian memakai 
 Sebelum deploy, cadangkan volume `licenses` secara privat. Hindari membuat resource baru tanpa volume penerbit lama karena resource baru dapat membuat kunci penandatangan yang berbeda. Setelah deploy, cek `/health` dan pastikan kunci publik di dashboard sama dengan nilai yang digunakan klien.
 
 Perpindahan domain dan pencabutan berlaku saat klien kembali meminta bukti. Bukti yang sudah diterbitkan bisa tetap berlaku secara offline sampai kedaluwarsa. Jadwal kedaluwarsa lisensi baru dipakai saat permintaan bukti berikutnya.
+
+
+### Fitur dasbor dan pencatatan
+
+- Kartu status menghitung seluruh lisensi dan membuka daftar sesuai status yang dipilih. Kategori **Segera habis** mencakup lisensi yang masih berlaku dan berakhir dalam 30 hari. Kategori **Aktif** pada dasbor mencakup lisensi yang berakhir lebih dari 30 hari lagi.
+- Daftar mendukung pencarian domain dan pelanggan, pengurutan, serta ekspor CSV sesuai filter. Ekspor tidak memuat kunci DRM, token, atau kunci privat.
+- Detail lisensi menampilkan ID, masa berlaku, waktu verifikasi berhasil terakhir, jumlah verifikasi berhasil, dan hingga 50 perubahan terbaru. Aktivasi awal dan validasi ulang memakai endpoint yang sama, sehingga hitungan mencakup keduanya. Riwayat dan verifikasi mulai tercatat setelah versi ini dijalankan.
+- Tombol **Perpanjang** menambahkan hari ke tanggal berakhir lisensi. Untuk lisensi kedaluwarsa, perhitungan dimulai dari waktu perpanjangan. Untuk lisensi yang dicabut, terbitkan lisensi baru jika akses perlu diberikan kembali.
+
+### Pembaruan dari GitHub
+
+Ekstrak ZIP pembaruan. Unggah isi folder ke root repositori `darmutiaralisensi` pada branch yang dibaca Coolify. Pastikan `compose.yaml` dan `Dockerfile` tetap berada di root. Gunakan resource penerbit yang sama untuk redeploy. Saat container mulai, inisialisasi menambahkan tabel dan pemicu pencatatan pada SQLite yang sudah ada sambil mempertahankan data lisensi dan kunci penandatangan yang ada pada volume.
+
+Untuk memeriksa hasil, buka `/health`, login ke dashboard, cocokkan kunci publik, lalu klik **Cek Ulang Lisensi** pada satu instalasi Kajian yang aktif. Pastikan kolom verifikasi berhasil diperbarui pada domain tersebut.
