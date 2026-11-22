@@ -107,3 +107,47 @@ class DashboardTest(unittest.TestCase):
         self.assertNotIn("catatan", export)
         self.assertEqual(self.request("/admin/profile", form | {"notes": ""})[0], 303)
         self.assertIn("Belum ada catatan", self.request(url)[1])
+
+    def test_vault_reveal_and_rotate(self):
+        from cryptography.fernet import Fernet
+        self.enterContext(patch.dict(os.environ, {"ISSUER_KEY_VAULT_SECRET": Fernet.generate_key().decode()}))
+        record = lisensi.issue("vault.example", "Pelanggan", 30)
+        key = record["license_key"]
+        url = "/admin/license?" + urlencode({"id": record["id"]})
+        detail = self.request(url)[1]
+        self.assertNotIn(key, detail)
+        self.assertNotIn(key, self.request("/admin/export.csv")[1])
+        self.assertIn("Buka kunci", detail)
+        csrf = re.search(r'name="csrf" value="([^"]+)"', detail)[1]
+        version = re.search(r'name="version" value="([^"]+)"', detail)[1]
+        data = {"id": record["id"], "csrf": csrf, "version": version}
+        self.assertEqual(self.request("/admin/reveal", data, authorize=False)[0], 401)
+        self.assertEqual(self.request("/admin/reveal", data | {"csrf": "bad"})[0], 403)
+        self.assertIn(key, self.request("/admin/reveal", data)[1])
+        self.assertEqual(self.request("/admin/rotate", data)[0], 400)
+        status, body = self.request("/admin/rotate", data | {"confirm": "yes"})
+        self.assertEqual(status, 200)
+        replacement = re.search(r'DRM-[A-Za-z0-9_-]{43}', body)[0]
+        self.assertNotEqual(key, replacement)
+        self.assertIsNone(lisensi.activate(key, "vault.example"))
+        self.assertIsNotNone(lisensi.activate(replacement, "vault.example"))
+        self.assertEqual(self.request("/admin/rotate", data | {"confirm": "yes"})[0], 400)
+        self.assertIn(replacement, self.request("/admin/reveal", data)[1])
+        detail = self.request(url)[1]
+        self.assertIn("Kunci dibuka", detail)
+        self.assertIn("Kunci diganti", detail)
+        self.assertNotIn(replacement, detail)
+        with lisensi.database() as db:
+            row = db.execute("SELECT ciphertext FROM license_secrets WHERE license_id = ?", (record["id"],)).fetchone()
+            self.assertNotIn(replacement.encode(), row["ciphertext"])
+        legacy = "4c4f0d26-fb79-422d-992c-4bc227cd0e14"
+        detail = self.request("/admin/license?id=" + legacy)[1]
+        self.assertIn("Kunci lama belum tersimpan", detail)
+        self.assertEqual(self.request("/admin/reveal", data | {"id": legacy})[0], 400)
+        wrong = {"ISSUER_KEY_VAULT_SECRET": Fernet.generate_key().decode()}
+        with patch.dict(os.environ, wrong):
+            self.assertEqual(self.request("/admin/reveal", data)[0], 400)
+            self.assertIsNotNone(lisensi.activate(replacement, "vault.example"))
+        revoked = data | {"confirm": "yes"}
+        self.assertEqual(self.request("/admin/revoke", revoked)[0], 303)
+        self.assertEqual(self.request("/admin/reveal", data)[0], 400)

@@ -13,6 +13,7 @@ import sys
 import time
 import uuid
 
+from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 
@@ -37,6 +38,18 @@ CREATE TABLE IF NOT EXISTS licenses (
 );
 
 CREATE INDEX IF NOT EXISTS licenses_expiry ON licenses (expires_at, id);
+CREATE TABLE IF NOT EXISTS license_secrets (
+    license_id TEXT PRIMARY KEY,
+    ciphertext BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS license_key_events (
+    event_id INTEGER PRIMARY KEY,
+    license_id TEXT NOT NULL,
+    occurred_at INTEGER NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS license_key_events_by_license ON license_key_events (license_id, event_id);
 CREATE TABLE IF NOT EXISTS license_profiles (
     license_id TEXT PRIMARY KEY,
     environment TEXT NOT NULL CHECK (environment IN ('', 'production', 'test')),
@@ -146,13 +159,70 @@ def issue_until(domain, customer, expiry):
         raise ValueError("Isi nama pelanggan dengan maksimal 160 karakter.")
     validate_expiry(expiry)
     key = "DRM-" + secrets.token_urlsafe(32)
+    vault = key_vault()
     license_id = str(uuid.uuid4())
     with database() as db:
         db.execute(
             "INSERT INTO licenses (id, key_digest, domain, customer, expires_at) VALUES (?, ?, ?, ?, ?)",
             (license_id, digest(key), domain, customer, expiry),
         )
-    return {"id": license_id, "domain": domain, "expires_at": utc_time(expiry), "license_key": key}
+        if vault is not None:
+            store_license_key(db, vault, license_id, key)
+    return {"id": license_id, "domain": domain, "expires_at": utc_time(expiry), "license_key": key,
+            "key_saved": vault is not None}
+
+
+def key_vault():
+    value = os.environ.get("ISSUER_KEY_VAULT_SECRET", "")
+    if not value:
+        return None
+    try:
+        return Fernet(value.encode("ascii"))
+    except (ValueError, TypeError) as error:
+        raise RuntimeError("Konfigurasi penyimpanan kunci tidak valid.") from error
+
+
+def store_license_key(db, vault, license_id, key):
+    encrypted = vault.encrypt(key.encode("ascii"))
+    db.execute("""
+        INSERT INTO license_secrets (license_id, ciphertext) VALUES (?, ?)
+        ON CONFLICT (license_id) DO UPDATE SET ciphertext = excluded.ciphertext
+    """, (license_id, encrypted))
+
+
+def access_license_key(license_id, actor, action, expected_version=""):
+    vault = key_vault()
+    if vault is None:
+        raise ValueError("Aktifkan penyimpanan kunci pada konfigurasi penerbit.")
+    if action not in ("reveal", "rotate"):
+        raise ValueError("Tindakan kunci tidak valid.")
+    with database() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("""
+            SELECT key_digest, revoked_at, ciphertext FROM licenses
+            LEFT JOIN license_secrets ON license_secrets.license_id = licenses.id WHERE id = ?
+        """, (license_id,)).fetchone()
+        if row is None or row["revoked_at"] is not None:
+            raise ValueError("Akses kunci tersedia untuk lisensi yang belum dicabut.")
+        if action == "reveal":
+            if row["ciphertext"] is None:
+                raise ValueError("Kunci lama belum tersimpan. Gunakan Ganti kunci.")
+            try:
+                key = vault.decrypt(row["ciphertext"]).decode("ascii")
+            except (InvalidToken, UnicodeError) as error:
+                raise ValueError("Kunci tidak bisa dibuka. Periksa rahasia penyimpanan yang dipakai saat penerbitan.") from error
+            if not LICENSE_PATTERN.fullmatch(key) or not secrets.compare_digest(digest(key), row["key_digest"]):
+                raise ValueError("Kunci tersimpan tidak cocok dengan lisensi.")
+        else:
+            if not secrets.compare_digest(row["key_digest"].hex()[:16].encode(), expected_version.encode()):
+                raise ValueError("Kunci telah berubah. Muat ulang detail lisensi sebelum mengganti.")
+            key = "DRM-" + secrets.token_urlsafe(32)
+            db.execute("UPDATE licenses SET key_digest = ? WHERE id = ?", (digest(key), license_id))
+            store_license_key(db, vault, license_id, key)
+        db.execute("""
+            INSERT INTO license_key_events (license_id, occurred_at, actor, action) VALUES (?, ?, ?, ?)
+        """, (license_id, int(time.time()), actor, action))
+    return key
 
 
 def validate_expiry(expiry):

@@ -6,6 +6,7 @@ services:
     environment:
       ISSUER_ADMIN_USER: ${ISSUER_ADMIN_USER:-admin}
       ISSUER_ADMIN_PASSWORD: ${ISSUER_ADMIN_PASSWORD:-}
+      ISSUER_KEY_VAULT_SECRET: ${ISSUER_KEY_VAULT_SECRET:-}
     volumes:
       - licenses:/data
 

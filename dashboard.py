@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlencode
 import uuid
 
-from lisensi import database, issue, issue_until, manage, normalize_domain, update_license
+from lisensi import access_license_key, database, issue, issue_until, manage, normalize_domain, update_license
 
 
 WIB = timezone(timedelta(hours=7), "WIB")
@@ -335,6 +335,35 @@ def secret_field(key, label):
             '<div><button type="button" class="secondary" data-copy="copy-key">Salin</button></div></div>')
 
 
+def key_controls(row, csrf_field, id_field, action):
+    with database() as db:
+        events = db.execute("""
+            SELECT occurred_at, actor, action FROM license_key_events
+            WHERE license_id = ? ORDER BY event_id DESC LIMIT 20
+        """, (row["id"],)).fetchall()
+    titles = {"reveal": "Kunci dibuka", "rotate": "Kunci diganti"}
+    items = "".join(f'<li>{titles[event["action"]]} · {escape(event["actor"])}'
+                    f'<br><small>{display_time(event["occurred_at"])}</small></li>' for event in events)
+    audit = f'<ol class="history">{items}</ol>' if items else '<p>Belum ada aktivitas kunci.</p>'
+    controls = ""
+    if row["revoked_at"] is None:
+        if os.environ.get("ISSUER_KEY_VAULT_SECRET"):
+            reveal = f"""<form method="post" action="/admin/reveal">{csrf_field}{id_field}
+<div><button class="secondary">Buka kunci</button></div></form>""" if row["key_saved"] else (
+                "<p>Kunci lama belum tersimpan. Gunakan Ganti kunci untuk menerbitkan penggantinya.</p>"
+            )
+            controls = f"""{reveal}<details class="panel"{" open" if action == "rotate" else ""}><summary>Ganti kunci</summary>
+<p>Kunci lama akan ditolak pada verifikasi berikutnya. Pasang kunci baru di Kajian.
+Bukti yang sudah diterbitkan bisa tetap berlaku hingga kedaluwarsa.</p>
+<form method="post" action="/admin/rotate">{csrf_field}{id_field}
+<input type="hidden" name="version" value="{row["key_version"]}">
+<label class="checkbox"><input type="checkbox" name="confirm" value="yes" required>Saya siap memasang kunci pengganti.</label>
+<div><button class="danger">Terbitkan kunci pengganti</button></div></form></details>"""
+        else:
+            controls = "<p>Aktifkan penyimpanan terenkripsi melalui konfigurasi penerbit untuk membuka dan mengganti kunci.</p>"
+    return f'<section class="panel"><h2>Kunci lisensi</h2>{controls}<h3>Aktivitas kunci</h3>{audit}</section>'
+
+
 def editor(start, csrf, row=None, form=None, error="", action="", feedback=""):
     form = form or {}
     editing = row is not None
@@ -354,13 +383,14 @@ def editor(start, csrf, row=None, form=None, error="", action="", feedback=""):
     error_html = f'<p class="notice error" role="alert">{escape(error)}</p>' if error else ""
     back = '<p><a href="/admin/">← Semua lisensi</a></p>'
     summary = license_summary(row) if editing else ""
+    keys = key_controls(row, csrf_field, id_field, action) if editing else ""
     confirmation_feedback = f'<p class="notice success" role="status">{escape(feedback)}</p>' if feedback else ""
     hero = f'<div class="hero"><h1>{escape(row["domain"]) if editing else title}</h1>'
     if editing:
         hero += f'<p class="muted">{escape(row["customer"])} · {display_time(row["expires_at"])} · {status_badge(row, int(time.time()))}</p>'
     hero += "</div>"
     if editing and row["revoked_at"] is not None:
-        return page(start, title, f'{back}{hero}{confirmation_feedback}{error_html}<p>Dicabut pada {display_time(row["revoked_at"])}.</p>{summary}', 400 if error else 200)
+        return page(start, title, f'{back}{hero}{confirmation_feedback}{error_html}<p>Dicabut pada {display_time(row["revoked_at"])}.</p>{summary}{keys}', 400 if error else 200)
     revoke = f"""<details class="panel"{" open" if action == "revoke" else ""}><summary>Cabut lisensi</summary>
 <p>Bukti yang sudah diterbitkan bisa tetap berlaku sampai diperiksa ulang atau kedaluwarsa.</p>
 <form method="post" action="/admin/revoke">{csrf_field}{id_field}
@@ -396,7 +426,7 @@ Saya ingin mencabut lisensi untuk {escape(row["domain"])}</label>
 <div class="detail-layout"><div>{summary}</div><div class="editor">
 {renewal}
 <details class="panel"{" open" if action == "license" else ""}><summary>Edit lisensi</summary>{fields}</details>
-{profile}{revoke}</div></div>""", 400 if error else 200)
+{profile}{keys}{revoke}</div></div>""", 400 if error else 200)
 
 
 def save_profile(license_id, environment, notes):
@@ -417,7 +447,10 @@ def get_license(license_id):
     if not license_id or str(uuid.UUID(license_id)) != license_id:
         raise ValueError("ID lisensi tidak valid.")
     with database() as db:
-        return db.execute(LICENSE_ROWS + " WHERE id = ?",
+        return db.execute(LICENSE_ROWS.replace("SELECT id,", """SELECT id,
+            lower(substr(hex(key_digest), 1, 16)) AS key_version,
+            EXISTS(SELECT 1 FROM license_secrets WHERE license_id = licenses.id) AS key_saved,""", 1)
+                          + " WHERE id = ?",
                           (license_id,)).fetchone()
 
 
@@ -469,7 +502,7 @@ def admin(environ, start):
                 row = get_license(params.get("id", [""])[0])
                 if row is not None:
                     return editor(start, csrf, row, feedback=FEEDBACK.get(params.get("saved", [""])[0], ""))
-        elif path in ("/admin/new", "/admin/license", "/admin/revoke", "/admin/renew", "/admin/profile"):
+        elif path in ("/admin/new", "/admin/license", "/admin/revoke", "/admin/renew", "/admin/profile", "/admin/reveal", "/admin/rotate"):
             length = int(environ.get("CONTENT_LENGTH") or 0)
             if not 1 <= length <= 8192 or environ.get("CONTENT_TYPE", "").split(";")[0] != "application/x-www-form-urlencoded":
                 raise ValueError("Formulir tidak valid.")
@@ -484,11 +517,22 @@ def admin(environ, start):
                 return page(start, "Lisensi diterbitkan",
                             f'<h1>Lisensi diterbitkan</h1><div class="panel editor"><h2>{escape(result["domain"])}</h2>'
                             f'<p>Berakhir {display_time(datetime.fromisoformat(result["expires_at"]).timestamp())}.</p>'
-                            '<p>Simpan kunci sekarang. Setelah halaman ini ditutup, kunci tidak dapat ditampilkan kembali.</p>'
+                            + ('<p>Admin dapat membukanya kembali dari detail lisensi.</p>' if result["key_saved"] else
+                             '<p>Simpan kunci sekarang. Kunci ini belum disimpan secara terenkripsi.</p>')
                             + secret_field(result["license_key"], "Kunci lisensi DRM")
                             + '<p><a href="/admin/">Kembali ke daftar lisensi</a></p></div>', 201)
             row = get_license(form.get("id", ""))
             if row is not None:
+                if path in ("/admin/reveal", "/admin/rotate"):
+                    action = path.rsplit("/", 1)[-1]
+                    if action == "rotate" and form.get("confirm") != "yes":
+                        raise ValueError("Konfirmasikan penggantian kunci.")
+                    key = access_license_key(row["id"], user, action, form.get("version", ""))
+                    heading = "Kunci pengganti diterbitkan" if action == "rotate" else "Kunci lisensi DRM"
+                    detail_url = "/admin/license?" + escape(urlencode({"id": row["id"]}))
+                    return page(start, heading, f'<h1>{heading}</h1><section class="panel editor">'
+                                f'<p>{escape(row["domain"])}</p>' + secret_field(key, "Kunci lisensi DRM")
+                                + f'<p><a href="{detail_url}">Tutup dan kembali ke detail</a></p></section>')
                 if path == "/admin/revoke":
                     if form.get("confirm") != "yes":
                         raise ValueError("Konfirmasikan pencabutan.")

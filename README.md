@@ -66,3 +66,17 @@ Untuk memeriksa hasil, buka `/health`, login ke dashboard, cocokkan kunci publik
 - Dari detail lisensi, gunakan **Edit profil instalasi** untuk memilih Produksi atau Uji dan menambahkan catatan internal. Profil melekat pada ID lisensi yang dipilih. Catatan internal hanya tampil di panel admin. CSV memuat label lingkungan.
 - Form perpanjangan, edit, dan pencabutan tersedia pada bagian terpisah. Cek tanggal, domain, dan ID lisensi sebelum mengubah data.
 - Jalankan pembaruan dependensi, cadangan, dan simulasi pemulihan secara berkala. Menjaga volume `licenses` pada `/data` mempertahankan database dan kunci penandatangan lama saat redeploy.
+
+### Buka kembali atau ganti kunci DRM
+
+1. Dari terminal lokal yang sudah memasang dependensi, buat satu rahasia acak.
+
+   ```sh
+   python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+   ```
+
+2. Masukkan hasil ke variabel runtime `ISSUER_KEY_VAULT_SECRET` di Coolify. Simpan salinannya di pengelola rahasia yang terpisah dari cadangan database. Jangan unggah nilainya ke GitHub. Redeploy resource penerbit yang sama dengan volume `licenses` tetap terpasang.
+3. Kunci yang diterbitkan setelah konfigurasi akan tersimpan terenkripsi. Dari detail lisensi klik **Buka kunci**. Kunci lengkap hanya muncul setelah tindakan tersebut dan tidak disertakan dalam CSV atau riwayat. Panel menampilkan 20 aktivitas terakhir. Riwayat mencatat nama akun Basic Auth, sehingga akun bersama menghasilkan nama pelaku yang sama.
+4. Untuk lisensi lama yang hanya punya hash, gunakan **Ganti kunci** lalu pasang kunci baru di Kajian. ID, domain, dan masa berlaku dipertahankan. Kunci lama ditolak pada verifikasi berikutnya. Token yang sudah diterbitkan sebelumnya dapat tetap berlaku sampai kedaluwarsa.
+
+Konfigurasi ini opsional. Tanpa rahasia tersebut, penerbitan tetap menampilkan kunci satu kali dan kunci lengkap tidak disimpan. Jika rahasia hilang atau berubah, kunci lama yang terenkripsi tidak dapat dibuka dengan rahasia pengganti. Validasi klien tetap menggunakan hash dan tidak bergantung pada rahasia penyimpanan. Lakukan uji pemulihan menggunakan database dan rahasia yang sesuai.
